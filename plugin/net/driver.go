@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/docker/libnetwork/drivers/remote/api"
-	"github.com/docker/libnetwork/types"
 
 	. "github.com/weaveworks/weave/common"
 	"github.com/weaveworks/weave/common/docker"
@@ -21,17 +20,15 @@ const (
 )
 
 type driver struct {
-	version    string
-	nameserver string
+	version string
 	sync.RWMutex
 	endpoints map[string]struct{}
 }
 
-func New(client *docker.Client, version string, nameserver string) (skel.Driver, error) {
+func New(client *docker.Client, version string) (skel.Driver, error) {
 	driver := &driver{
-		nameserver: nameserver,
-		version:    version,
-		endpoints:  make(map[string]struct{}),
+		version:   version,
+		endpoints: make(map[string]struct{}),
 	}
 
 	_, err := NewWatcher(client, driver)
@@ -152,14 +149,6 @@ func (driver *driver) JoinEndpoint(j *api.JoinRequest) (*api.JoinResponse, error
 
 	response := &api.JoinResponse{
 		InterfaceName: ifname,
-	}
-	if driver.nameserver != "" {
-		routeToDNS := api.StaticRoute{
-			Destination: driver.nameserver + "/32",
-			RouteType:   types.CONNECTED,
-			NextHop:     "",
-		}
-		response.StaticRoutes = []api.StaticRoute{routeToDNS}
 	}
 	Log.Infof("Join endpoint %s:%s to %s", j.NetworkID, j.EndpointID, j.SandboxKey)
 	return response, nil
