@@ -20,13 +20,17 @@ const (
 	WeaveBridge    = "weave"
 )
 
+type endpoint struct {
+	link *netlink.Veth
+}
+
 type driver struct {
 	version          string
 	nameserver       string
 	scope            string
 	noMulticastRoute bool
 	sync.RWMutex
-	endpoints map[string]struct{}
+	endpoints map[string]endpoint
 }
 
 func New(client *docker.Client, version string, nameserver string, scope string, noMulticastRoute bool) (skel.Driver, error) {
@@ -35,7 +39,7 @@ func New(client *docker.Client, version string, nameserver string, scope string,
 		noMulticastRoute: noMulticastRoute,
 		version:          version,
 		scope:            scope,
-		endpoints:        make(map[string]struct{}),
+		endpoints:        make(map[string]endpoint),
 	}
 
 	_, err := NewWatcher(client, driver)
@@ -73,18 +77,31 @@ func (driver *driver) DeleteNetwork(delete *api.DeleteNetworkRequest) error {
 }
 
 func (driver *driver) CreateEndpoint(create *api.CreateEndpointRequest) (*api.CreateEndpointResponse, error) {
-	Log.Debugf("Create endpoint request %+v", create)
+	Log.Debugf("Create endpoint request %+v interface %+v", create, create.Interface)
 	endID := create.EndpointID
 
 	if create.Interface == nil {
 		return nil, fmt.Errorf("Not supported: creating an interface from within CreateEndpoint")
 	}
+	// create veths and store for later
+	suffix := endID[:5]
+	local := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{Name: "vethwl" + suffix},
+		PeerName:  "vethwg" + suffix,
+	}
+	if err := netlink.LinkAdd(local); err != nil {
+		return nil, errorf("could not create veth pair: %s", err)
+	}
 	driver.Lock()
-	driver.endpoints[endID] = struct{}{}
+	driver.endpoints[endID] = endpoint{link: local}
 	driver.Unlock()
-	resp := &api.CreateEndpointResponse{}
+
+	// Send back the MAC address
+	link, _ := netlink.LinkByName(local.PeerName)
+	resp := &api.CreateEndpointResponse{Interface: &api.EndpointInterface{MacAddress: link.Attrs().HardwareAddr.String()}}
 
 	Log.Infof("Create endpoint %s %+v", endID, resp)
+	Log.Infof("Veth info %+v", local)
 	return resp, nil
 }
 
@@ -92,8 +109,15 @@ func (driver *driver) DeleteEndpoint(deleteReq *api.DeleteEndpointRequest) error
 	Log.Debugf("Delete endpoint request: %+v", deleteReq)
 	Log.Infof("Delete endpoint %s", deleteReq.EndpointID)
 	driver.Lock()
+	endpoint, found := driver.endpoints[deleteReq.EndpointID]
 	delete(driver.endpoints, deleteReq.EndpointID)
 	driver.Unlock()
+	if !found {
+		return errorf(`endpoint "%s" not found`, deleteReq.EndpointID)
+	}
+	if err := netlink.LinkDel(endpoint.link); err != nil {
+		Log.Warningf("unable to delete veth: %s", err)
+	}
 	return nil
 }
 
@@ -118,11 +142,15 @@ func (driver *driver) JoinEndpoint(j *api.JoinRequest) (*api.JoinResponse, error
 		return nil, errorf(`bridge "%s" not present; did you launch weave?`, WeaveBridge)
 	}
 
-	// create and attach local name to the bridge
-	local := vethPair(endID[:5])
-	local.Attrs().MTU = maybeBridge.Attrs().MTU
-	if err := netlink.LinkAdd(local); err != nil {
-		return nil, errorf("could not create veth pair: %s", err)
+	driver.Lock()
+	endpoint, found := driver.endpoints[endID]
+	driver.Unlock()
+	if !found {
+		return nil, errorf(`endpoint "%s" not found`, endID)
+	}
+	local := endpoint.link
+	if err = netlink.LinkSetMTU(local, maybeBridge.Attrs().MTU); err != nil {
+		return nil, errorf(`unable to set mtu: %s`, err)
 	}
 
 	switch maybeBridge.(type) {
@@ -177,11 +205,6 @@ func (driver *driver) JoinEndpoint(j *api.JoinRequest) (*api.JoinResponse, error
 
 func (driver *driver) LeaveEndpoint(leave *api.LeaveRequest) error {
 	Log.Debugf("Leave request: %+v", leave)
-
-	local := vethPair(leave.EndpointID[:5])
-	if err := netlink.LinkDel(local); err != nil {
-		Log.Warningf("unable to delete veth on leave: %s", err)
-	}
 	Log.Infof("Leave %s:%s", leave.NetworkID, leave.EndpointID)
 	return nil
 }
@@ -194,13 +217,4 @@ func (driver *driver) DiscoverNew(disco *api.DiscoveryNotification) error {
 func (driver *driver) DiscoverDelete(disco *api.DiscoveryNotification) error {
 	Log.Debugf("Dicovery delete notification: %+v", disco)
 	return nil
-}
-
-// ===
-
-func vethPair(suffix string) *netlink.Veth {
-	return &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: "vethwl" + suffix},
-		PeerName:  "vethwg" + suffix,
-	}
 }
