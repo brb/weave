@@ -185,11 +185,18 @@ func (c *GossipChannel) SendDown(conn Connection, data GossipData) {
 }
 
 func (c *GossipChannel) sendDown(conns []Connection, data GossipData) {
+	for _, sender := range c.sendersFor(conns) {
+		sender.Send(data)
+	}
+}
+
+func (c *GossipChannel) sendersFor(conns []Connection) []*GossipSender {
 	if len(conns) == 0 {
-		return
+		return nil
 	}
 	ourConnections := c.ourself.Connections()
 	c.Lock()
+	defer c.Unlock()
 	// GC - randomly (courtesy of go's map iterator) pick some
 	// existing senders and stop&remove them if the associated
 	// connection is no longer active.  We stop as soon as we
@@ -219,11 +226,7 @@ func (c *GossipChannel) sendDown(conns []Connection, data GossipData) {
 		}
 		senders[i] = sender
 	}
-	c.Unlock()
-	// send
-	for _, sender := range senders {
-		sender.Send(data)
-	}
+	return senders
 }
 
 func (c *GossipChannel) makeSender(conn Connection) *GossipSender {
