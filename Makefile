@@ -1,7 +1,7 @@
 PUBLISH=publish_weave publish_weaveexec publish_plugin
 
 .DEFAULT: all
-.PHONY: all update tests lint publish $(PUBLISH) clean clean-bin prerequisites build travis run-smoketests
+.PHONY: all update tests lint publish $(PUBLISH) clean clean-bin prerequisites build exes run-smoketests
 
 # If you can use docker without being root, you can do "make SUDO="
 SUDO=sudo
@@ -59,6 +59,7 @@ BUILD_FLAGS=-i -ldflags "-extldflags \"-static\" -X main.version=$(WEAVE_VERSION
 PACKAGE_BASE=$(shell go list -e ./)
 
 all: $(WEAVE_EXPORT) $(RUNNER_EXE) $(TEST_TLS_EXE)
+exes: $(EXES)
 
 $(EXES): $(VENDOR_UPTODATE) $(BUILD_UPTODATE)
 $(VENDOR_UPTODATE): vendor/manifest $(BUILD_UPTODATE)
@@ -90,6 +91,10 @@ $(VENDOR_UPTODATE):
 	touch $@
 
 $(WEAVER_EXE) $(WEAVEPROXY_EXE):
+	go build $(BUILD_FLAGS) -o $@ ./$(@D)
+	$(NETGO_CHECK)
+
+$(WEAVEUTIL_EXE):
 ifeq ($(COVERAGE),true)
 	$(eval COVERAGE_MODULES := $(shell (go list ./$(@D); go list -f '{{join .Deps "\n"}}' ./$(@D) | grep "^$(PACKAGE_BASE)/") | paste -s -d,))
 	go test -c -o ./$@ $(BUILD_FLAGS) -v -covermode=atomic -coverpkg $(COVERAGE_MODULES) ./$(@D)/
@@ -100,7 +105,7 @@ endif
 
 # These next programs need separate rules as they fail the netgo check in
 # the main build stanza due to not importing net package
-$(WEAVEWAIT_NOOP_EXE) $(SIGPROXY_EXE) $(DOCKERPLUGIN_EXE) $(TEST_TLS_EXE) $(WEAVEUTIL_EXE):
+$(WEAVEWAIT_NOOP_EXE) $(SIGPROXY_EXE) $(DOCKERPLUGIN_EXE) $(TEST_TLS_EXE):
 	go build $(BUILD_FLAGS) -o $@ ./$(@D)
 
 $(WEAVEWAIT_EXE):
