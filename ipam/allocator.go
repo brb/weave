@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/weaveworks/weave/common"
+	"github.com/weaveworks/weave/ipam/monitor"
 	"github.com/weaveworks/weave/ipam/paxos"
 	"github.com/weaveworks/weave/ipam/ring"
 	"github.com/weaveworks/weave/ipam/space"
@@ -57,19 +58,23 @@ type Allocator struct {
 	shuttingDown     bool // to avoid doing any requests while trying to shut down
 	isKnownPeer      func(mesh.PeerName) bool
 	now              func() time.Time
+	isCIDRAligned    bool                 // should donate only CIDR aligned ranges
+	allocMonitor     monitor.AllocMonitor // monitor tracks updates in address ranges owned by us
 }
 
 // NewAllocator creates and initialises a new Allocator
-func NewAllocator(ourName mesh.PeerName, ourUID mesh.PeerUID, ourNickname string, universe address.Range, quorum uint, isKnownPeer func(name mesh.PeerName) bool) *Allocator {
+func NewAllocator(ourName mesh.PeerName, ourUID mesh.PeerUID, ourNickname string, universe address.Range, quorum uint, isKnownPeer func(name mesh.PeerName) bool, isCIDRAligned bool) *Allocator {
 	return &Allocator{
-		ourName:     ourName,
-		universe:    universe,
-		ring:        ring.New(universe.Start, universe.End, ourName),
-		owned:       make(map[string][]address.Address),
-		paxos:       paxos.NewNode(ourName, ourUID, quorum),
-		nicknames:   map[mesh.PeerName]string{ourName: ourNickname},
-		isKnownPeer: isKnownPeer,
-		now:         time.Now,
+		ourName:       ourName,
+		universe:      universe,
+		ring:          ring.New(universe.Start, universe.End, ourName),
+		owned:         make(map[string][]address.Address),
+		paxos:         paxos.NewNode(ourName, ourUID, quorum),
+		nicknames:     map[mesh.PeerName]string{ourName: ourNickname},
+		isKnownPeer:   isKnownPeer,
+		now:           time.Now,
+		isCIDRAligned: isCIDRAligned,
+		allocMonitor:  monitor.NewNullMonitor(),
 	}
 }
 

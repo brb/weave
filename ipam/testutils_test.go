@@ -135,7 +135,7 @@ func makeAllocator(name string, cidrStr string, quorum uint) (*Allocator, addres
 	}
 
 	alloc := NewAllocator(peername, mesh.PeerUID(rand.Int63()),
-		"nick-"+name, cidr.Range(), quorum, func(mesh.PeerName) bool { return true })
+		"nick-"+name, cidr.Range(), quorum, func(mesh.PeerName) bool { return true }, false)
 
 	return alloc, cidr.HostRange()
 }
