@@ -58,8 +58,8 @@ type Allocator struct {
 	shuttingDown     bool // to avoid doing any requests while trying to shut down
 	isKnownPeer      func(mesh.PeerName) bool
 	now              func() time.Time
-	isCIDRAligned    bool                 // should donate only CIDR aligned ranges
-	allocMonitor     monitor.AllocMonitor // monitor tracks updates in address ranges owned by us
+	isCIDRAligned    bool            // should donate only CIDR aligned ranges
+	monitor          monitor.Monitor // monitor tracks changes in address ranges owned by us
 }
 
 // NewAllocator creates and initialises a new Allocator
@@ -74,7 +74,7 @@ func NewAllocator(ourName mesh.PeerName, ourUID mesh.PeerUID, ourNickname string
 		isKnownPeer:   isKnownPeer,
 		now:           time.Now,
 		isCIDRAligned: isCIDRAligned,
-		allocMonitor:  monitor.NewNullMonitor(),
+		monitor:       monitor.NewNullMonitor(),
 	}
 }
 
@@ -698,7 +698,6 @@ func (alloc *Allocator) donateSpace(r address.Range, to mesh.PeerName) {
 	defer alloc.sendRingUpdate(to)
 
 	alloc.debugln("Peer", to, "asked me for space")
-	// oldRanges := alloc.space.OwnedRanges()
 	chunk, ok := alloc.space.Donate(r, false)
 	if !ok {
 		free := alloc.space.NumFreeAddressesInRange(r)
