@@ -18,6 +18,7 @@ import (
 	"github.com/weaveworks/weave/common/docker"
 	"github.com/weaveworks/weave/common/odp"
 	"github.com/weaveworks/weave/ipam"
+	"github.com/weaveworks/weave/ipam/monitor"
 	"github.com/weaveworks/weave/mesh"
 	"github.com/weaveworks/weave/nameserver"
 	weavenet "github.com/weaveworks/weave/net"
@@ -70,6 +71,8 @@ func main() {
 		iface                     *net.Interface
 		datapathName              string
 		trustedSubnetStr          string
+		useAWSVPC                 bool
+		awsRouteTableId           string
 
 		defaultDockerHost = "unix:///var/run/docker.sock"
 	)
@@ -109,6 +112,8 @@ func main() {
 	mflag.StringVar(&datapathName, []string{"-datapath"}, "", "ODP datapath name")
 
 	mflag.StringVar(&trustedSubnetStr, []string{"-trusted-subnets"}, "", "Command separated list of trusted subnets in CIDR notation")
+	mflag.BoolVar(&useAWSVPC, []string{"#awsvpc", "-awsvpc"}, false, "use AWS VPC for routing")
+	mflag.StringVar(&awsRouteTableId, []string{"#aws-routetableid", "-aws-routetableid"}, "", "AWS VPC Route Table Id")
 
 	// crude way of detecting that we probably have been started in a
 	// container, with `weave launch` --> suppress misleading paths in
@@ -163,20 +168,22 @@ func main() {
 	config.ProtocolMinVersion = byte(protocolMinVersion)
 
 	var fastDPOverlay weave.NetworkOverlay
-	if datapathName != "" {
-		// A datapath name implies that "Bridge" and "Overlay"
-		// packet handling use fast datapath, although other
-		// options can override that below.  Even if both
-		// things are overridden, we might need bridging on
-		// the datapath.
-		fastdp, err := weave.NewFastDatapath(weave.FastDatapathConfig{
-			DatapathName: datapathName,
-			Port:         config.Port,
-		})
+	if !useAWSVPC {
+		if datapathName != "" {
+			// A datapath name implies that "Bridge" and "Overlay"
+			// packet handling use fast datapath, although other
+			// options can override that below.  Even if both
+			// things are overridden, we might need bridging on
+			// the datapath.
+			fastdp, err := weave.NewFastDatapath(weave.FastDatapathConfig{
+				DatapathName: datapathName,
+				Port:         config.Port,
+			})
 
-		checkFatal(err)
-		networkConfig.Bridge = fastdp.Bridge()
-		fastDPOverlay = fastdp.Overlay()
+			checkFatal(err)
+			networkConfig.Bridge = fastdp.Bridge()
+			fastDPOverlay = fastdp.Overlay()
+		}
 	}
 
 	if ifaceName != "" {
@@ -185,13 +192,15 @@ func main() {
 		// than capture via ODP misses, even when using an
 		// ODP-based bridge.  So when using weave encyption,
 		// it's preferable to use -iface.
-		var err error
-		iface, err = weavenet.EnsureInterface(ifaceName)
-		checkFatal(err)
+		if !useAWSVPC {
+			var err error
+			iface, err = weavenet.EnsureInterface(ifaceName)
+			checkFatal(err)
 
-		// bufsz flag is in MB
-		networkConfig.Bridge, err = weave.NewPcap(iface, bufSzMB*1024*1024)
-		checkFatal(err)
+			// bufsz flag is in MB
+			networkConfig.Bridge, err = weave.NewPcap(iface, bufSzMB*1024*1024)
+			checkFatal(err)
+		}
 	}
 
 	if password == "" {
@@ -206,12 +215,18 @@ func main() {
 	}
 
 	overlays := weave.NewOverlaySwitch()
-	if fastDPOverlay != nil {
-		overlays.Add("fastdp", fastDPOverlay)
+	if !useAWSVPC {
+		if fastDPOverlay != nil {
+			overlays.Add("fastdp", fastDPOverlay)
+		}
+		sleeve := weave.NewSleeveOverlay(config.Port)
+		overlays.Add("sleeve", sleeve)
+		overlays.SetCompatOverlay(sleeve)
+	} else {
+		nullOverlay := &weave.NullNetworkOverlay{}
+		overlays.Add("null", nullOverlay)
+		networkConfig.Bridge = &weave.NullBridge{}
 	}
-	sleeve := weave.NewSleeveOverlay(config.Port)
-	overlays.Add("sleeve", sleeve)
-	overlays.SetCompatOverlay(sleeve)
 
 	if routerName == "" {
 		if iface == nil {
@@ -273,7 +288,9 @@ func main() {
 	var allocator *ipam.Allocator
 	var defaultSubnet address.CIDR
 	if iprangeCIDR != "" {
-		allocator, defaultSubnet = createAllocator(router.Router, iprangeCIDR, ipsubnetCIDR, determineQuorum(peerCount, peers), isKnownPeer)
+		allocator, defaultSubnet = createAllocator(router.Router, iprangeCIDR,
+			ipsubnetCIDR, determineQuorum(peerCount, peers), isKnownPeer,
+			useAWSVPC, awsRouteTableId)
 		observeContainers(allocator)
 	} else if peerCount > 0 {
 		Log.Fatal("--init-peer-count flag specified without --ipalloc-range")
@@ -380,7 +397,10 @@ func parseAndCheckCIDR(cidrStr string) address.CIDR {
 	return cidr
 }
 
-func createAllocator(router *mesh.Router, ipRangeStr string, defaultSubnetStr string, quorum uint, isKnownPeer func(mesh.PeerName) bool) (*ipam.Allocator, address.CIDR) {
+func createAllocator(router *mesh.Router, ipRangeStr string, defaultSubnetStr string,
+	quorum uint, isKnownPeer func(mesh.PeerName) bool,
+	useAWSVPC bool, awsRouteTableId string) (*ipam.Allocator, address.CIDR) {
+
 	ipRange := parseAndCheckCIDR(ipRangeStr)
 	defaultSubnet := ipRange
 	if defaultSubnetStr != "" {
@@ -389,8 +409,18 @@ func createAllocator(router *mesh.Router, ipRangeStr string, defaultSubnetStr st
 			Log.Fatalf("IP address allocation default subnet %s does not overlap with allocation range %s", defaultSubnet, ipRange)
 		}
 	}
+
+	var mon monitor.Monitor
+	mon = monitor.NewNullMonitor()
+	isCIDRAligned := false
+	if useAWSVPC {
+		Log.Infoln("Using AWS VPC monitor")
+		mon = monitor.NewAwsVPCMonitor(awsRouteTableId)
+		isCIDRAligned = true
+	}
 	allocator := ipam.NewAllocator(router.Ourself.Peer.Name, router.Ourself.Peer.UID,
-		router.Ourself.Peer.NickName, ipRange.Range(), quorum, isKnownPeer, false)
+		router.Ourself.Peer.NickName, ipRange.Range(), quorum, isKnownPeer,
+		isCIDRAligned, mon)
 
 	allocator.SetInterfaces(router.NewGossip("IPallocation", allocator))
 	allocator.Start()
