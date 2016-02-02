@@ -168,39 +168,35 @@ func main() {
 	config.ProtocolMinVersion = byte(protocolMinVersion)
 
 	var fastDPOverlay weave.NetworkOverlay
-	if !useAWSVPC {
-		if datapathName != "" {
-			// A datapath name implies that "Bridge" and "Overlay"
-			// packet handling use fast datapath, although other
-			// options can override that below.  Even if both
-			// things are overridden, we might need bridging on
-			// the datapath.
-			fastdp, err := weave.NewFastDatapath(weave.FastDatapathConfig{
-				DatapathName: datapathName,
-				Port:         config.Port,
-			})
+	if datapathName != "" && !useAWSVPC {
+		// A datapath name implies that "Bridge" and "Overlay"
+		// packet handling use fast datapath, although other
+		// options can override that below.  Even if both
+		// things are overridden, we might need bridging on
+		// the datapath.
+		fastdp, err := weave.NewFastDatapath(weave.FastDatapathConfig{
+			DatapathName: datapathName,
+			Port:         config.Port,
+		})
 
-			checkFatal(err)
-			networkConfig.Bridge = fastdp.Bridge()
-			fastDPOverlay = fastdp.Overlay()
-		}
+		checkFatal(err)
+		networkConfig.Bridge = fastdp.Bridge()
+		fastDPOverlay = fastdp.Overlay()
 	}
 
-	if ifaceName != "" {
+	if ifaceName != "" && !useAWSVPC {
 		// -iface can coexist with -datapath, because
 		// pcap-based packet capture is a bit more efficient
 		// than capture via ODP misses, even when using an
 		// ODP-based bridge.  So when using weave encyption,
 		// it's preferable to use -iface.
-		if !useAWSVPC {
-			var err error
-			iface, err = weavenet.EnsureInterface(ifaceName)
-			checkFatal(err)
+		var err error
+		iface, err = weavenet.EnsureInterface(ifaceName)
+		checkFatal(err)
 
-			// bufsz flag is in MB
-			networkConfig.Bridge, err = weave.NewPcap(iface, bufSzMB*1024*1024)
-			checkFatal(err)
-		}
+		// bufsz flag is in MB
+		networkConfig.Bridge, err = weave.NewPcap(iface, bufSzMB*1024*1024)
+		checkFatal(err)
 	}
 
 	if password == "" {
@@ -214,18 +210,18 @@ func main() {
 		Log.Println("Communication between peers via untrusted networks is encrypted.")
 	}
 
-	overlays := weave.NewOverlaySwitch()
+	var overlays weave.NetworkOverlay
 	if !useAWSVPC {
+		overlaySwitch := weave.NewOverlaySwitch()
 		if fastDPOverlay != nil {
-			overlays.Add("fastdp", fastDPOverlay)
+			overlaySwitch.Add("fastdp", fastDPOverlay)
 		}
 		sleeve := weave.NewSleeveOverlay(config.Port)
-		overlays.Add("sleeve", sleeve)
-		overlays.SetCompatOverlay(sleeve)
+		overlaySwitch.Add("sleeve", sleeve)
+		overlaySwitch.SetCompatOverlay(sleeve)
+		overlays = overlaySwitch
 	} else {
-		nullOverlay := &weave.NullNetworkOverlay{}
-		overlays.Add("null", nullOverlay)
-		networkConfig.Bridge = &weave.NullBridge{}
+		overlays = weave.NullNetworkOverlay{}
 	}
 
 	if routerName == "" {
